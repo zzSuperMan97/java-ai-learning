@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>我的 AI 助手</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }
+        #chat-box { border: 1px solid #ccc; height: 400px; overflow-y: scroll; padding: 10px; margin-bottom: 10px; }
+        .message { margin: 5px 0; padding: 8px; border-radius: 5px; }
+        .user { background-color: #e1ffc7; text-align: right; }
+        .ai { background-color: #f1f0f0; text-align: left; }
+        #input-area { display: flex; }
+        input { flex: 1; padding: 8px; }
+        button { padding: 8px 15px; margin-left: 5px; }
+
+
+        .message {
+            margin: 10px 0;
+            padding: 10px 15px;
+            border-radius: 15px;
+            max-width: 80%;
+            line-height: 1.5;
+        }
+        .user {
+            background-color: #95ec69; /* 微信绿 */
+            color: black;
+            margin-left: auto; /* 靠右对齐 */
+            border-bottom-right-radius: 2px;
+        }
+        .ai {
+            background-color: #ffffff; /* 白色背景 */
+            color: black;
+            margin-right: auto; /* 靠左对齐 */
+            border: 1px solid #e5e5e5;
+            border-bottom-left-radius: 2px;
+        }
+    </style>
+</head>
+<body>
+<h2>🤖 我的 AI 助手</h2>
+<div id="chat-box"></div>
+<div id="input-area">
+    <input type="text" id="user-input" placeholder="输入你的问题..." onkeypress="handleEnter(event)">
+    <button onclick="sendMessage()">发送</button>
+</div>
+
+<script>
+    function handleEnter(e) { if (e.key === 'Enter') sendMessage(); }
+
+    async function sendMessage() {
+        const input = document.getElementById('user-input');
+        const question = input.value;
+        if (!question.trim()) return;
+
+        // 显示用户消息
+        addMessage(question, 'user');
+        input.value = '';
+
+        // 显示“思考中...”
+        const loadingId = addMessage('AI 正在思考...', 'ai');
+
+        try {
+            // 调用后端接口
+            const response = await fetch(`/ai/chat?question=${encodeURIComponent(question)}`);
+            const answer = await response.text();
+
+            // 移除“思考中”，显示真实回答
+            document.getElementById(loadingId).remove();
+            addMessage(answer, 'ai');
+        } catch (error) {
+            document.getElementById(loadingId).innerText = '出错了，请重试';
+        }
+    }
+
+    function addMessage(text, sender) {
+        const box = document.getElementById('chat-box');
+        const div = document.createElement('div');
+        div.className = `message ${sender}`;
+        div.innerText = text;
+        div.id = 'msg-' + Date.now();
+        box.appendChild(div);
+        box.scrollTop = box.scrollHeight;
+        return div.id;
+    }
+</script>
+</body>
+</html>
