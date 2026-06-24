@@ -1,6 +1,7 @@
 package org.example.ailearning.contoller;
 
 import org.example.ailearning.service.AiService;
+import org.example.ailearning.service.KnowledgeBaseService;
 import org.example.ailearning.utils.WordGenerator;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Controller;
@@ -19,8 +20,9 @@ public class AiController {
     @Autowired
     private AiService aiService;
     @Autowired
-    private WordGenerator wordGenerator; // 2. 注入工具类
-
+    private WordGenerator wordGenerator;
+    @Autowired
+    private KnowledgeBaseService knowledgeBaseService;
 
     @GetMapping("/chat")
     @ResponseBody
@@ -91,22 +93,24 @@ public class AiController {
         return String.format("\"%s\" 和 \"%s\" 的相似度: %.4f", text1, text2, score);
     }
 
-    // 启动时加载一些示例知识（模拟从数据库加载）
-    @GetMapping("/init-knowledge")
+    /**
+     * 添加文档到知识库
+     */
+    @PostMapping("/knowledge/add")
     @ResponseBody
-    public String initKnowledge() {
-        aiService.addDocument("2024年5月，华东区销售额达到150万元，环比增长12%。");
-        aiService.addDocument("2024年5月，华北区销售额达到80万元，环比下降5%。");
-        aiService.addDocument("智能手机X-Pro是公司最畅销的产品，占总销售额的40%。");
-        aiService.addDocument("公司计划在6月推出一款新的平板电脑产品线。");
-        aiService.addDocument("华南区客户满意度调查显示，售后服务评分最高，达到4.8分。");
-        return "✅ 知识库已初始化，共加载 5 条文档";
+    public String addKnowledge(@RequestParam String docId,
+                               @RequestParam String content,
+                               @RequestParam(required = false, defaultValue = "general") String category) {
+        aiService.addToKnowledgeBase(docId, content, category);
+        return "✅ 文档已存入知识库，当前共 " + knowledgeBaseService.count() + " 条";
     }
 
-    // RAG 问答接口
-    @GetMapping("/rag-chat")
+    /**
+     * 数据库版 RAG 问答
+     */
+    @GetMapping("/rag-db")
     @ResponseBody
-    public String ragChat(@RequestParam String question) {
-        return aiService.ragChat(question);
+    public String ragFromDB(@RequestParam String question) {
+        return aiService.ragChatFromDB(question);
     }
 }

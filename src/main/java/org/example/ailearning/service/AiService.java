@@ -11,6 +11,7 @@ import com.alibaba.dashscope.embeddings.TextEmbeddingResult;
 import com.alibaba.dashscope.exception.ApiException;
 import com.alibaba.dashscope.exception.InputRequiredException;
 import com.alibaba.dashscope.exception.NoApiKeyException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -25,8 +26,8 @@ public class AiService {
     @Value("${dashscope.api.key}")
     private String apiKey;
 
-    // 内存中的"知识库"（实际项目中存在数据库里）
-    private List<Map<String, Object>> knowledgeBase = new java.util.ArrayList<>();
+    @Autowired
+    private KnowledgeBaseService knowledgeBaseService;
 
     /**
      * 发送消息给通义千问，并获取回复
@@ -112,6 +113,15 @@ public class AiService {
     }
 
     /**
+     * 添加文档到知识库（存入数据库）
+     */
+    public void addToKnowledgeBase(String docId, String content, String category) {
+        List<Double> vector = getEmbedding(content);
+        knowledgeBaseService.saveDocument(docId, content, category, vector);
+    }
+
+
+    /**
      * 计算两个向量的余弦相似度（0~1，越接近 1 表示越相似）
      */
     public double cosineSimilarity(List<Double> a, List<Double> b) {
@@ -128,64 +138,32 @@ public class AiService {
         return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
     }
 
-
     /**
-     * 往知识库里添加文档
+     * 数据库版 RAG 问答
      */
-    public void addDocument(String text) {
-        List<Double> vector = getEmbedding(text);
-        Map<String, Object> doc = new java.util.HashMap<>();
-        doc.put("text", text);
-        doc.put("vector", vector);
-        knowledgeBase.add(doc);
-        System.out.println("已添加文档: " + text.substring(0, Math.min(text.length(), 20)) + "...");
-    }
+    public String ragChatFromDB(String question) {
+        // 1. 问题转向量
+        List<Double> queryVector = getEmbedding(question);
 
-    /**
-     * 根据问题，从知识库中找出最相关的文档
-     */
-    public List<String> search(String question, int topK) {
-        List<Double> questionVector = getEmbedding(question);
+        // 2. 从数据库搜索最相关的文档（阈值0.5，低于此值的不要）
+        List<String> relevantDocs = knowledgeBaseService.searchBySimilarity(queryVector, 3, 0.5);
 
-        // 计算每个文档和问题的相似度，排序
-        List<Map.Entry<String, Double>> scores = new java.util.ArrayList<>();
-        for (Map<String, Object> doc : knowledgeBase) {
-            @SuppressWarnings("unchecked")
-            List<Double> docVector = (List<Double>) doc.get("vector");
-            double score = cosineSimilarity(questionVector, docVector);
-            scores.add(Map.entry((String) doc.get("text"), score));
-        }
-
-        // 按相似度从高到低排序，取前 topK 个
-        scores.sort((a, b) -> b.getValue().compareTo(a.getValue()));
-        List<String> results = new java.util.ArrayList<>();
-        for (int i = 0; i < topK && i < scores.size(); i++) {
-            results.add(scores.get(i).getKey());
-        }
-        return results;
-    }
-
-    /**
-     * 完整的 RAG 问答：先检索，再生成
-     */
-    public String ragChat(String question) {
-        // 1. 检索最相关的文档
-        List<String> relevantDocs = search(question, 3);
-
+        // 3. 如果没有检索到相关文档，直接告知用户
         if (relevantDocs.isEmpty()) {
-            return chat("请直接回答这个问题：" + question);
+            return "知识库中没有找到与您问题相关的信息，请尝试换个问法或补充知识库内容。";
         }
 
-        // 2. 拼接 Prompt
+        // 4. 拼接 Prompt
         StringBuilder prompt = new StringBuilder();
-        prompt.append("请根据以下参考资料回答用户问题。如果参考资料不足以回答，就说根据已有资料无法确定。\n\n");
+        prompt.append("请根据以下参考资料回答用户问题。如果资料不足以回答，就说'根据已有资料无法确定'。\n\n");
         prompt.append("参考资料：\n");
         for (int i = 0; i < relevantDocs.size(); i++) {
             prompt.append(i + 1).append(". ").append(relevantDocs.get(i)).append("\n");
         }
         prompt.append("\n用户问题：").append(question);
 
-        // 3. 调用 AI 生成答案
+        // 5. 调用 AI 生成答案
         return chat(prompt.toString());
     }
+
 }
