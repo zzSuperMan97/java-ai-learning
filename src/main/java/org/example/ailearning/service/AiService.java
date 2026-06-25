@@ -1,9 +1,12 @@
 package org.example.ailearning.service;
 
+import com.alibaba.dashscope.aigc.codegeneration.CodeGenerationResult;
 import com.alibaba.dashscope.aigc.generation.Generation;
 import com.alibaba.dashscope.aigc.generation.GenerationParam;
 import com.alibaba.dashscope.aigc.generation.GenerationResult;
+import com.alibaba.dashscope.base.HalfDuplexServiceParam;
 import com.alibaba.dashscope.common.Message;
+import com.alibaba.dashscope.common.ResultCallback;
 import com.alibaba.dashscope.common.Role;
 import com.alibaba.dashscope.embeddings.TextEmbedding;
 import com.alibaba.dashscope.embeddings.TextEmbeddingParam;
@@ -13,8 +16,12 @@ import com.alibaba.dashscope.exception.InputRequiredException;
 import com.alibaba.dashscope.exception.NoApiKeyException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -164,6 +171,60 @@ public class AiService {
 
         // 5. 调用 AI 生成答案
         return chat(prompt.toString());
+    }
+
+    /**
+     * 发送消息给通义千问，并获取回复
+     * @param prompt 用户的问题
+     * @return AI 的回答
+     */
+    public void streamChat(String prompt, SseEmitter sseEmitter) {
+        try {
+            // 1. 构建消息对象
+            Message userMessage = Message.builder()
+                    .role(Role.USER.getValue())
+                    .content(prompt)
+                    .build();
+
+            // 2. 构建请求参数
+            GenerationParam param = GenerationParam.builder()
+                    .apiKey(apiKey)
+                    .model("qwen-turbo") // 使用通义千问 Turbo 模型，速度快且便宜
+//                    .model("qwen-max") // 使用通义千问 Turbo 模型，速度快且便宜
+                    .messages(Arrays.asList(userMessage))
+                    .resultFormat(GenerationParam.ResultFormat.MESSAGE)
+                    .build();
+
+            // 3. 调用 API
+            Generation generation = new Generation();
+
+            generation.streamCall(param, new ResultCallback<GenerationResult>() {
+                @Override
+                public void onEvent(GenerationResult result) {
+                    String content = result.getOutput().getChoices().get(0).getMessage().getContent();
+                    try {
+                        String utf8Content = new String(content.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
+                        sseEmitter.send(SseEmitter.event()
+                                .name("message")
+                                .data(utf8Content));
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+
+                @Override
+                public void onComplete() {
+                    sseEmitter.complete();
+                }
+
+                @Override
+                public void onError(Exception e) {
+                    sseEmitter.completeWithError(e);
+                }
+            });
+        } catch (ApiException | NoApiKeyException | InputRequiredException e) {
+            e.printStackTrace();
+        }
     }
 
 }
