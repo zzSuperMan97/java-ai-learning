@@ -174,6 +174,39 @@ public class AiService {
     }
 
     /**
+     * 数据库版 RAG 流式问答
+     */
+    public void streamRagFromDB(String question,SseEmitter sseEmitter) throws IOException {
+        // 1. 问题转向量
+        List<Double> queryVector = getEmbedding(question);
+
+        // 2. 从数据库搜索最相关的文档（阈值0.5，低于此值的不要）
+        List<String> relevantDocs = knowledgeBaseService.searchBySimilarity(queryVector, 3, 0.5);
+
+        // 3. 如果没有检索到相关文档，直接告知用户
+        if (relevantDocs.isEmpty()) {
+            sseEmitter.send(SseEmitter.event()
+                    .name("message")
+                    .data("知识库中没有找到与您问题相关的信息，请尝试换个问法或补充知识库内容。"));
+        }
+
+        // 4. 拼接 Prompt
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("请根据以下参考资料回答用户问题。如果资料不足以回答，就说'根据已有资料无法确定'。\n\n");
+        prompt.append("参考资料：\n");
+        for (int i = 0; i < relevantDocs.size(); i++) {
+            prompt.append(i + 1).append(". ").append(relevantDocs.get(i)).append("\n");
+        }
+        prompt.append("\n用户问题：").append(question);
+
+        // 5. 调用 AI 生成答案
+        streamChat(prompt.toString(),sseEmitter);
+    }
+
+
+
+
+    /**
      * 发送消息给通义千问，并获取回复
      * @param prompt 用户的问题
      * @return AI 的回答

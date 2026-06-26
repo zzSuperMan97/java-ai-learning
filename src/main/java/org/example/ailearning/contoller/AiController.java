@@ -151,4 +151,41 @@ public class AiController {
     public String ragFromDB(@RequestParam String question) {
         return aiService.ragChatFromDB(question);
     }
+
+    @GetMapping(value = "/rag-stream", produces = "text/event-stream;charset=UTF-8")
+    @ResponseBody
+    public SseEmitter streamRagFromDB(HttpServletResponse response, @RequestParam String question) {
+        response.setContentType("text/event-stream;charset=UTF-8");
+        response.setCharacterEncoding("UTF-8");
+        response.setHeader("Cache-Control", "no-cache");
+        response.setHeader("Connection", "keep-alive");
+
+        // 设置超时10分钟
+        SseEmitter sseEmitter = new SseEmitter(600000L);
+
+        // 必须注册生命周期回调，防止连接泄漏、编码异常
+        sseEmitter.onCompletion(() -> {
+            System.out.println("SSE连接正常关闭");
+        });
+        sseEmitter.onError((ex) -> {
+            System.err.println("SSE连接异常：" + ex.getMessage());
+            sseEmitter.complete();
+        });
+        sseEmitter.onTimeout(() -> {
+            System.out.println("SSE连接超时");
+            sseEmitter.complete();
+        });
+
+        // 异步调用AI服务（不要在当前Tomcat同步线程阻塞）
+        new Thread(() -> {
+            try {
+                aiService.streamRagFromDB(question,sseEmitter);
+            } catch (Exception e) {
+                sseEmitter.complete();
+            }
+        }).start();
+
+        return sseEmitter;
+    }
+
 }
