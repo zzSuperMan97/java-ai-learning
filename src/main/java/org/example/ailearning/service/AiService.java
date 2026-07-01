@@ -14,8 +14,11 @@ import com.alibaba.dashscope.embeddings.TextEmbeddingResult;
 import com.alibaba.dashscope.exception.ApiException;
 import com.alibaba.dashscope.exception.InputRequiredException;
 import com.alibaba.dashscope.exception.NoApiKeyException;
+import org.apache.poi.util.StringUtil;
+import org.example.ailearning.utils.StrTool;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -26,6 +29,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 @Service
 public class AiService {
@@ -36,6 +41,9 @@ public class AiService {
     @Autowired
     private KnowledgeBaseService knowledgeBaseService;
 
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
     /**
      * 发送消息给通义千问，并获取回复
      * @param prompt 用户的问题
@@ -44,6 +52,11 @@ public class AiService {
     public String chat(String prompt) {
         try {
             // 1. 构建消息对象
+            Message systemMessage = Message.builder()
+                    .role(Role.USER.getValue())
+                    .content("你是一个专业的销售数据分析师，只根据提供的资料回答问题，不要编造数据。 没有数据就不要瞎说")
+                    .build();
+
             Message userMessage = Message.builder()
                     .role(Role.USER.getValue())
                     .content(prompt)
@@ -54,7 +67,7 @@ public class AiService {
                     .apiKey(apiKey)
                     .model("qwen-turbo") // 使用通义千问 Turbo 模型，速度快且便宜
 //                    .model("qwen-max") // 使用通义千问 Turbo 模型，速度快且便宜
-                    .messages(Arrays.asList(userMessage))
+                    .messages(Arrays.asList(systemMessage,userMessage))
                     .resultFormat(GenerationParam.ResultFormat.MESSAGE)
                     .build();
 
@@ -75,16 +88,21 @@ public class AiService {
         return CompletableFuture.supplyAsync(()->{
             try {
                 // 1. 构建消息对象
-                Message userMessage = Message.builder()
+                Message systemMessage = Message.builder()
                         .role(Role.USER.getValue())
                         .content(prompt)
                         .build();
+                Message userMessage = Message.builder()
+                        .role(Role.USER.getValue())
+                        .content("你是一个专业的销售数据分析师，只根据提供的资料回答问题，不要编造数据。")
+                        .build();
+
 
                 // 2. 构建请求参数
                 GenerationParam param = GenerationParam.builder()
                         .apiKey(apiKey)
                         .model("qwen-turbo") // 使用通义千问 Turbo 模型，速度快且便宜
-                        .messages(Arrays.asList(userMessage))
+                        .messages(Arrays.asList(systemMessage,userMessage))
                         .resultFormat(GenerationParam.ResultFormat.MESSAGE)
                         .build();
 
@@ -104,6 +122,12 @@ public class AiService {
 
     public List<Double> getEmbedding(String text) {
         try {
+            String key = "embedding:"+text;
+            String str = redisTemplate.opsForValue().get(key);
+            if (!StringUtil.isBlank(str)){
+                return StrTool.convertSquareBracketToDoubleList(str);
+            }
+
             TextEmbeddingParam param = TextEmbeddingParam.builder()
                     .apiKey(apiKey)
                     .model("text-embedding-v1")
@@ -112,8 +136,10 @@ public class AiService {
 
             TextEmbedding embedding = new TextEmbedding();
             TextEmbeddingResult result = embedding.call(param);
+            List<Double> embedding1 = result.getOutput().getEmbeddings().get(0).getEmbedding();
 
-            return result.getOutput().getEmbeddings().get(0).getEmbedding();
+            redisTemplate.opsForValue().set(key,embedding1.toString(),7, TimeUnit.DAYS);
+            return embedding1;
         } catch (Exception e) {
             throw new RuntimeException("Embedding 调用失败", e);
         }
@@ -149,6 +175,11 @@ public class AiService {
      * 数据库版 RAG 问答
      */
     public String ragChatFromDB(String question) {
+        String key = "embedding:"+Math.abs(question.hashCode());
+        String answer = redisTemplate.opsForValue().get(key);
+        if (!StringUtil.isBlank(answer)){
+             return answer;
+        }
         // 1. 问题转向量
         List<Double> queryVector = getEmbedding(question);
 
@@ -162,13 +193,14 @@ public class AiService {
 
         // 4. 拼接 Prompt
         StringBuilder prompt = new StringBuilder();
-        prompt.append("请根据以下参考资料回答用户问题。如果资料不足以回答，就说'根据已有资料无法确定'。\n\n");
+        prompt.append("你是一个专业的销售数据分析师 请根据以下参考资料回答用户问题 并且按照json格式返回。如果资料不足以回答，就说'根据已有资料无法确定'。\n\n");
         prompt.append("参考资料：\n");
         for (int i = 0; i < relevantDocs.size(); i++) {
             prompt.append(i + 1).append(". ").append(relevantDocs.get(i)).append("\n");
         }
         prompt.append("\n用户问题：").append(question);
-
+        String chat = chat(prompt.toString());
+        redisTemplate.opsForValue().set(key,chat,1,TimeUnit.DAYS);
         // 5. 调用 AI 生成答案
         return chat(prompt.toString());
     }
@@ -237,6 +269,7 @@ public class AiService {
                     String content = result.getOutput().getChoices().get(0).getMessage().getContent();
                     try {
                         String utf8Content = new String(content.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
+                        utf8Content = utf8Content.replace("```json", "").replace("```", "").trim();
                         sseEmitter.send(SseEmitter.event()
                                 .name("message")
                                 .data(utf8Content));
