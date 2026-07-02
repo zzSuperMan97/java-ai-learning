@@ -188,7 +188,9 @@ public class AiService {
 
         // 3. 如果没有检索到相关文档，直接告知用户
         if (relevantDocs.isEmpty()) {
-            return "知识库中没有找到与您问题相关的信息，请尝试换个问法或补充知识库内容。";
+            String result = "知识库中没有找到与您问题相关的信息，请尝试换个问法或补充知识库内容。";
+            redisTemplate.opsForValue().set(key,result,5,TimeUnit.MINUTES);
+            return result;
         }
 
         // 4. 拼接 Prompt
@@ -202,7 +204,7 @@ public class AiService {
         String chat = chat(prompt.toString());
         redisTemplate.opsForValue().set(key,chat,1,TimeUnit.DAYS);
         // 5. 调用 AI 生成答案
-        return chat(prompt.toString());
+        return chat;
     }
 
     /**

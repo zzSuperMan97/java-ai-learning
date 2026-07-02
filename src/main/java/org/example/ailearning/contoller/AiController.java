@@ -5,6 +5,7 @@ import org.example.ailearning.service.AiService;
 import org.example.ailearning.service.KnowledgeBaseService;
 import org.example.ailearning.utils.WordGenerator;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -24,6 +25,9 @@ public class AiController {
     private WordGenerator wordGenerator;
     @Autowired
     private KnowledgeBaseService knowledgeBaseService;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
     @GetMapping("/chat")
     @ResponseBody
@@ -151,6 +155,55 @@ public class AiController {
     public String ragFromDB(@RequestParam String question) {
         return aiService.ragChatFromDB(question);
     }
+
+    /**
+     * 性能对比测试：量化 Redis 缓存带来的性能提升
+     */
+    @GetMapping("/performance-test")
+    @ResponseBody
+    public String performanceTest() {
+        String testText = "苹果";
+        String testQuestion = "哪款手机最畅销";
+
+        // 清除缓存，确保第一次调用是无缓存状态
+        redisTemplate.delete("embedding:" + testText);
+        redisTemplate.delete("embedding:" + Math.abs(testQuestion.hashCode()));
+
+        // 第一次调用：无缓存
+        long embeddingStartNoCache = System.currentTimeMillis();
+        aiService.getEmbedding(testText);
+        long embeddingEndNoCache = System.currentTimeMillis();
+
+        long ragStartNoCache = System.currentTimeMillis();
+        aiService.ragChatFromDB(testQuestion);
+        long ragEndNoCache = System.currentTimeMillis();
+
+        // 第二次调用：命中缓存
+        long embeddingStartWithCache = System.currentTimeMillis();
+        aiService.getEmbedding(testText);
+        long embeddingEndWithCache = System.currentTimeMillis();
+
+        long ragStartWithCache = System.currentTimeMillis();
+        aiService.ragChatFromDB(testQuestion);
+        long ragEndWithCache = System.currentTimeMillis();
+
+        // 计算耗时
+        long embeddingTimeNoCache = embeddingEndNoCache - embeddingStartNoCache;
+        long embeddingTimeWithCache = embeddingEndWithCache - embeddingStartWithCache;
+        long ragTimeNoCache = ragEndNoCache - ragStartNoCache;
+        long ragTimeWithCache = ragEndWithCache - ragStartWithCache;
+
+        // 计算提升倍数（无缓存耗时 / 有缓存耗时）
+        double embeddingSpeedup = embeddingTimeWithCache == 0 ? 0 : (double) embeddingTimeNoCache / embeddingTimeWithCache;
+        double ragSpeedup = ragTimeWithCache == 0 ? 0 : (double) ragTimeNoCache / ragTimeWithCache;
+
+        return String.format("{\n" +
+                "  \"embedding\": { \"无缓存\": \"%dms\", \"有缓存\": \"%dms\", \"提升\": \"%.1f倍\" },\n" +
+                "  \"rag查询\": { \"无缓存\": \"%dms\", \"有缓存\": \"%dms\", \"提升\": \"%.1f倍\" }\n" +
+                "}", embeddingTimeNoCache, embeddingTimeWithCache, embeddingSpeedup,
+                ragTimeNoCache, ragTimeWithCache, ragSpeedup);
+    }
+
 
     @GetMapping(value = "/rag-stream", produces = "text/event-stream;charset=UTF-8")
     @ResponseBody
