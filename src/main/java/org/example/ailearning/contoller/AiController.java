@@ -1,6 +1,8 @@
 package org.example.ailearning.contoller;
 
 import jakarta.servlet.http.HttpServletResponse;
+import org.apache.poi.util.StringUtil;
+import org.example.ailearning.common.ThreadPoolConfig;
 import org.example.ailearning.service.AiService;
 import org.example.ailearning.service.KnowledgeBaseService;
 import org.example.ailearning.utils.WordGenerator;
@@ -10,10 +12,16 @@ import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collector;
+import java.util.stream.Collectors;
 
 @Controller
 @RequestMapping("/ai")
@@ -28,6 +36,13 @@ public class AiController {
 
     @Autowired
     private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    private ThreadPoolConfig threadPoolConfig;
+
+    @Autowired
+    private ThreadPoolExecutor threadPoolExecutor;
+
 
     @GetMapping("/chat")
     @ResponseBody
@@ -239,6 +254,91 @@ public class AiController {
         }).start();
 
         return sseEmitter;
+    }
+
+    @GetMapping("/test/async-demo")
+    @ResponseBody
+    public String asyncDemo(@RequestParam String question) throws ExecutionException, InterruptedException {
+        CompletableFuture<String> future = CompletableFuture.supplyAsync(() -> {
+            String chat = aiService.chat("你好");
+            return chat;
+        }).thenApply(str -> {
+            return "【异步】"+str;
+        });
+        String s = future.get();
+        return s;
+    }
+
+    @GetMapping("/test/parallel-embeddin")
+    @ResponseBody
+    public String parallelEmbedding(@RequestParam String question) throws ExecutionException, InterruptedException {
+        List<String> list = new ArrayList<>(6);
+        list.add("华北区退货200件");
+        list.add("华东区销售1560件");
+        list.add("产品库存9850件");
+        list.add("西南区域订单2360件");
+        list.add("华南财务对账620笔");
+        list.add("西北物流配送3680单");
+        list.add(null);
+        long start = System.currentTimeMillis();
+        ThreadPoolExecutor threadPoolExecutor = threadPoolConfig.getThreadPoolExecutor();
+//        List<CompletableFuture<List<Double>>> collect = list.stream().map(str -> CompletableFuture.supplyAsync(() -> aiService.getEmbedding(str), threadPoolExecutor).exceptionally(ex->{
+//            System.out.println("异步报错");
+//            return List.of();
+//        })).collect(Collectors.toList());
+
+        List<CompletableFuture<List<Double>>> collect = list.stream().map(str -> CompletableFuture.supplyAsync(() -> aiService.getEmbedding(str), threadPoolExecutor)
+        .handle((result, ex) -> {
+            if (ex != null) {
+                System.out.println("出错了: " + ex.getMessage());
+                 return List.<Double>of();
+            }
+            return result;
+        })).collect(Collectors.toList());
+
+        CompletableFuture.allOf(collect.toArray(new CompletableFuture[0])).get();
+        long end = System.currentTimeMillis();
+        System.out.println(collect);
+        return "消耗时常"+(end - start);
+
+    }
+
+    @GetMapping("/test/rag-async")
+    @ResponseBody
+    public String ragAsync(@RequestParam String question) throws ExecutionException, InterruptedException {
+        String key = "rag:" + Math.abs(question.hashCode());
+        CompletableFuture<List<Double>> embeddingFuture = CompletableFuture.supplyAsync(() -> {
+            return aiService.getEmbedding(question);
+        }, threadPoolExecutor);
+
+        CompletableFuture<String> cacheFuture = CompletableFuture.supplyAsync(() -> {
+            return redisTemplate.opsForValue().get(key);
+        }, threadPoolExecutor);
+        CompletableFuture.allOf(embeddingFuture,cacheFuture).get();
+        if (!StringUtil.isBlank(cacheFuture.get())){
+            return cacheFuture.get();
+        }
+        List<Double> doubles = embeddingFuture.get();
+        List<String> relevantDocs = knowledgeBaseService.searchBySimilarity(doubles, 3, 0.5);
+
+        if (relevantDocs.isEmpty()) {
+            String result = "知识库中没有找到与您问题相关的信息，请尝试换个问法或补充知识库内容。";
+            redisTemplate.opsForValue().set(key, result, 5, TimeUnit.MINUTES);
+            return result;
+        }
+
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("你是一个专业的销售数据分析师 请根据以下参考资料回答用户问题 并且按照json格式返回。如果资料不足以回答，就说'根据已有资料无法确定'。\n\n");
+        prompt.append("参考资料：\n");
+        for (int i = 0; i < relevantDocs.size(); i++) {
+            prompt.append(i + 1).append(". ").append(relevantDocs.get(i)).append("\n");
+        }
+        prompt.append("\n用户问题：").append(question);
+
+        String answer = aiService.chat(prompt.toString());
+        redisTemplate.opsForValue().set(key, answer, 1, TimeUnit.DAYS);
+        return answer;
+
     }
 
 }

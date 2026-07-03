@@ -122,7 +122,7 @@ public class AiService {
 
     public List<Double> getEmbedding(String text) {
         try {
-            String key = "embedding:"+text;
+            String key = "embedding:"+Math.abs(text.hashCode());
             String str = redisTemplate.opsForValue().get(key);
             if (!StringUtil.isBlank(str)){
                 return StrTool.convertSquareBracketToDoubleList(str);
@@ -175,7 +175,7 @@ public class AiService {
      * 数据库版 RAG 问答
      */
     public String ragChatFromDB(String question) {
-        String key = "embedding:"+Math.abs(question.hashCode());
+        String key = "rag:"+Math.abs(question.hashCode());
         String answer = redisTemplate.opsForValue().get(key);
         if (!StringUtil.isBlank(answer)){
              return answer;
