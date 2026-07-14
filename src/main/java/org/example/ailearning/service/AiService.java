@@ -195,7 +195,12 @@ public class AiService {
 
         // 4. 拼接 Prompt
         StringBuilder prompt = new StringBuilder();
-        prompt.append("你是一个专业的销售数据分析师 请根据以下参考资料回答用户问题 并且按照json格式返回。如果资料不足以回答，就说'根据已有资料无法确定'。\n\n");
+        prompt.append("你是一个专业的销售数据分析师，根据参考资料回答问题。\n\n");
+        prompt.append("回答格式示例：\n");
+        prompt.append("用户问题：华东区2024年5月销售额是多少？\n");
+        prompt.append("回答：{\"region\":\"华东区\",\"period\":\"2024年5月\",\"metric\":\"销售额\",\"value\":\"150万元\"}\n\n");
+        prompt.append("请先分析参考资料中有哪些相关数据，再给出最终回答。\n\n");
+        prompt.append("禁止编造参考资料中没有的数据，如果某个字段在资料中找不到，该字段返回\"未知\"。\n");
         prompt.append("参考资料：\n");
         for (int i = 0; i < relevantDocs.size(); i++) {
             prompt.append(i + 1).append(". ").append(relevantDocs.get(i)).append("\n");
