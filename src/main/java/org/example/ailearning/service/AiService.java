@@ -14,6 +14,11 @@ import com.alibaba.dashscope.embeddings.TextEmbeddingResult;
 import com.alibaba.dashscope.exception.ApiException;
 import com.alibaba.dashscope.exception.InputRequiredException;
 import com.alibaba.dashscope.exception.NoApiKeyException;
+import com.alibaba.dashscope.tools.FunctionDefinition;
+import com.alibaba.dashscope.tools.ToolFunction;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.apache.poi.util.StringUtil;
 import org.example.ailearning.utils.StrTool;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,11 +26,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.util.ObjectUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -65,8 +72,7 @@ public class AiService {
             // 2. 构建请求参数
             GenerationParam param = GenerationParam.builder()
                     .apiKey(apiKey)
-                    .model("qwen-turbo") // 使用通义千问 Turbo 模型，速度快且便宜
-//                    .model("qwen-max") // 使用通义千问 Turbo 模型，速度快且便宜
+                    .model("qwen-plus")
                     .messages(Arrays.asList(systemMessage,userMessage))
                     .resultFormat(GenerationParam.ResultFormat.MESSAGE)
                     .build();
@@ -82,6 +88,216 @@ public class AiService {
             e.printStackTrace();
             return "AI 调用失败: " + e.getMessage();
         }
+    }
+
+    /**
+     * 带函数调用的聊天（Function Calling）
+     */
+    public String chatWithFunctions(String prompt, List<FunctionDefinition> functions) {
+        try {
+            // 1. 构建消息
+            Message userMessage = Message.builder()
+                    .role(Role.USER.getValue())
+                    .content(prompt)
+                    .build();
+
+            // 2. 将 FunctionDefinition 包装成 ToolFunction
+            List<com.alibaba.dashscope.tools.ToolBase> tools = new java.util.ArrayList<>();
+            for (FunctionDefinition func : functions) {
+                tools.add(ToolFunction.builder().function(func).build());
+            }
+
+            // 3. 构建请求参数，使用 tools() 而不是 functions()
+            GenerationParam param = GenerationParam.builder()
+                    .apiKey(apiKey)
+                    .model("qwen-plus")
+                    .messages(Arrays.asList(userMessage))
+                    .tools(tools)
+                    .resultFormat(GenerationParam.ResultFormat.MESSAGE)
+                    .build();
+
+            // 4. 调用 API
+            Generation generation = new Generation();
+            GenerationResult result = generation.call(param);
+
+            // 5. 检查是否需要调用函数
+            Message responseMessage = result.getOutput().getChoices().get(0).getMessage();
+            
+            if (responseMessage.getToolCalls() != null && !responseMessage.getToolCalls().isEmpty()) {
+                // LLM 决定调用函数
+                Object toolCall = responseMessage.getToolCalls().get(0);
+                // 使用反射获取 function 信息
+                java.lang.reflect.Method getFunctionMethod = toolCall.getClass().getMethod("getFunction");
+                Object functionCall = getFunctionMethod.invoke(toolCall);
+                
+                java.lang.reflect.Method getNameMethod = functionCall.getClass().getMethod("getName");
+                java.lang.reflect.Method getArgumentsMethod = functionCall.getClass().getMethod("getArguments");
+                
+                String functionName = (String) getNameMethod.invoke(functionCall);
+                String arguments = (String) getArgumentsMethod.invoke(functionCall);
+                
+                System.out.println("LLM 决定调用函数: " + functionName);
+                System.out.println("参数: " + arguments);
+                
+                // 6. 执行函数并获取结果
+                String functionResult = executeFunction(functionName, arguments);
+                if (functionResult.contains("系统查询失败")) return "系统查询失败";
+
+                // 7. 将函数结果返回给 LLM 生成最终回答
+                Message functionMessage = Message.builder()
+                        .role("tool")
+                        .content(functionResult)
+                        .build();
+                
+                GenerationParam followUpParam = GenerationParam.builder()
+                        .apiKey(apiKey)
+                        .model("qwen-plus")
+                        .messages(Arrays.asList(userMessage, responseMessage, functionMessage))
+                        .resultFormat(GenerationParam.ResultFormat.MESSAGE)
+                        .build();
+                
+                GenerationResult followUpResult = generation.call(followUpParam);
+                return followUpResult.getOutput().getChoices().get(0).getMessage().getContent();
+                
+            } else {
+                // 不需要调用函数，直接返回回答
+                return responseMessage.getContent();
+            }
+            
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "AI 调用失败: " + e.getMessage();
+        }
+    }
+
+    /**
+     * 执行函数（根据函数名调用对应方法）
+     */
+    private String executeFunction(String functionName, String arguments) {
+        try {
+            if ("query_sales_data".equals(functionName)) {
+                String region = extractJsonValue(arguments, "region");
+                String month = extractJsonValue(arguments, "month");
+
+                int i;
+                for (i = 0; i < 3; i++) {
+                    try {
+                        Map<String, Object> result = querySalesData(region, month);
+                        return new com.google.gson.Gson().toJson(result);
+                    }catch (Exception e){
+                        e.getMessage();
+                    }
+                }
+                return "系统查询失败";
+            } else if ("query_inventory".equals(functionName)) {
+                String region = extractJsonValue(arguments, "region");
+                String product = extractJsonValue(arguments, "product");
+                Map<String, Object> result = queryInventory(region, product);
+                return new com.google.gson.Gson().toJson(result);
+            } else if ("query_customer".equals(functionName)) {
+                String customerName = extractJsonValue(arguments, "customer_name");
+                Map<String, Object> result = queryCustomer(customerName);
+                return new com.google.gson.Gson().toJson(result);
+            }
+            return "{\"error\": \"未知函数\"}";
+        } catch (Exception e) {
+            return "{\"error\": \"" + e.getMessage() + "\"}";
+        }
+    }
+
+    /**
+     * 简单解析 JSON 中的值（实际项目建议用 Jackson/Gson）
+     */
+    private String extractJsonValue(String json, String key) {
+        // 简单实现：{"region": "华东", "month": "2024-05"}
+        JsonObject asJsonObject = JsonParser.parseString(json).getAsJsonObject();
+        JsonElement jsonElement = asJsonObject.get(key);
+        if (jsonElement == null) {
+            return null;
+        }
+        return jsonElement.getAsString();
+    }
+
+    /**
+     * 查询销售数据（模拟数据库查询）
+     */
+    public Map<String, Object> querySalesData(String region, String month) throws Exception {
+        // 这里应该查数据库，先用模拟数据
+        Map<String, Object> result = new HashMap<>();
+        if (month == null || month.isEmpty()){
+            result.put("error", "缺少month参数，请询问用户想查询的具体月份");
+            return result;
+        }
+        if ("华东".equals(region) && "2024-05".equals(month)) {
+            result.put("sales", 1500000);
+            result.put("unit", "元");
+            result.put("region", region);
+            result.put("month", month);
+        } else if ("华北".equals(region) && "2024-05".equals(month)) {
+            result.put("sales", 800000);
+            result.put("unit", "元");
+            result.put("region", region);
+            result.put("month", month);
+        } else {
+            result.put("error", "未找到相关数据");
+        }
+        
+        return result;
+    }
+
+    /**
+     * 查询库存数据（模拟数据库查询）
+     */
+    public Map<String, Object> queryInventory(String region, String product) {
+        Map<String, Object> result = new HashMap<>();
+
+        if ("华东".equals(region) && "手机".equals(product)) {
+            result.put("inventory", 5200);
+            result.put("unit", "台");
+            result.put("region", region);
+            result.put("product", product);
+        } else if ("华北".equals(region) && "手机".equals(product)) {
+            result.put("inventory", 3100);
+            result.put("unit", "台");
+            result.put("region", region);
+            result.put("product", product);
+        } else if ("华东".equals(region) && "笔记本".equals(product)) {
+            result.put("inventory", 1800);
+            result.put("unit", "台");
+            result.put("region", region);
+            result.put("product", product);
+        } else {
+            result.put("error", "未找到相关库存数据");
+        }
+
+        return result;
+    }
+
+    /**
+     * 查询客户信息（模拟数据库查询）
+     */
+    public Map<String, Object> queryCustomer(String customerName) {
+        Map<String, Object> result = new HashMap<>();
+
+        if ("华为".equals(customerName)) {
+            result.put("customer", "华为技术有限公司");
+            result.put("level", "VIP");
+            result.put("total_orders", 156);
+            result.put("total_amount", 8500000);
+            result.put("unit", "元");
+            result.put("contact", "张经理");
+        } else if ("小米".equals(customerName)) {
+            result.put("customer", "小米科技有限公司");
+            result.put("level", "金牌");
+            result.put("total_orders", 89);
+            result.put("total_amount", 3200000);
+            result.put("unit", "元");
+            result.put("contact", "李经理");
+        } else {
+            result.put("error", "未找到该客户信息");
+        }
+
+        return result;
     }
 
     public CompletableFuture<String> asyncChat (String prompt) {
@@ -101,7 +317,7 @@ public class AiService {
                 // 2. 构建请求参数
                 GenerationParam param = GenerationParam.builder()
                         .apiKey(apiKey)
-                        .model("qwen-turbo") // 使用通义千问 Turbo 模型，速度快且便宜
+                        .model("qwen3.7-plus") // 使用通义千问 Turbo 模型，速度快且便宜
                         .messages(Arrays.asList(systemMessage,userMessage))
                         .resultFormat(GenerationParam.ResultFormat.MESSAGE)
                         .build();
@@ -242,7 +458,77 @@ public class AiService {
         streamChat(prompt.toString(),sseEmitter);
     }
 
+    public void saveMessage(String sessionId, String role, String content) {
+        String key = String.format("chat:history:%s",sessionId);
+        redisTemplate.opsForHash().put(key,String.valueOf(System.currentTimeMillis()),String.format("{\"role\":\"%s\",\"content\":\"%s\"}",
+                role, content));
+        redisTemplate.expire(key, 30, TimeUnit.MINUTES);
+    }
 
+    public String getHistory(String sessionId, int lastN) {
+        String key = String.format("chat:history:%s", sessionId);
+        Map<Object, Object> entries = redisTemplate.opsForHash().entries(key);
+        if (entries.isEmpty()) {
+            return "";
+        }
+        // 按时间戳排序，取最后 lastN 条
+        return entries.entrySet().stream()
+                .sorted((e1, e2) -> String.valueOf(e1.getKey()).compareTo(String.valueOf(e2.getKey())))
+                .skip(Math.max(0, entries.size() - lastN))
+                .map(entry -> {
+                    String json = String.valueOf(entry.getValue());
+                    // 简单解析 JSON，提取 role 和 content
+                    String role = json.contains("\"user\"") ? "用户" : "AI";
+                    String content = json.replaceAll(".*\"content\":\"(.*)\"\\s*}$", "$1");
+                    return role + "：" + content;
+                })
+                .collect(Collectors.joining("\n"));
+    }
+
+    /**
+     * 带上下文的 RAG 多轮对话
+     */
+    public String chatWithHistory(String sessionId, String question) {
+        // 1. 保存用户问题
+        saveMessage(sessionId, "user", question);
+
+        // 2. 获取最近对话历史
+        String history = getHistory(sessionId, 10);
+
+        // 3. RAG：检索知识库
+        List<Double> queryVector = getEmbedding(question);
+        List<String> relevantDocs = knowledgeBaseService.searchBySimilarity(queryVector, 3, 0.5);
+
+        // 4. 组装 Prompt：系统角色 + 历史对话 + 参考资料 + 当前问题
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("你是一个专业的销售数据分析师，只根据提供的资料回答问题，不要编造数据。\n\n");
+
+        if (!history.isEmpty()) {
+            prompt.append("以下是之前的对话记录：\n");
+            prompt.append(history);
+            prompt.append("\n\n");
+        }
+
+        if (!relevantDocs.isEmpty()) {
+            prompt.append("参考资料：\n");
+            for (int i = 0; i < relevantDocs.size(); i++) {
+                prompt.append(i + 1).append(". ").append(relevantDocs.get(i)).append("\n");
+            }
+            prompt.append("\n");
+        } else {
+            prompt.append("知识库中没有找到相关信息，如果用户问题无法回答，请告知。\n\n");
+        }
+
+        prompt.append("用户当前问题：").append(question);
+
+        // 5. 调用 LLM
+        String answer = chat(prompt.toString());
+
+        // 6. 保存 AI 回答
+        saveMessage(sessionId, "assistant", answer);
+
+        return answer;
+    }
 
 
     /**
@@ -261,7 +547,7 @@ public class AiService {
             // 2. 构建请求参数
             GenerationParam param = GenerationParam.builder()
                     .apiKey(apiKey)
-                    .model("qwen-turbo") // 使用通义千问 Turbo 模型，速度快且便宜
+                    .model("qwen3.7-plus") // 使用通义千问 Turbo 模型，速度快且便宜
 //                    .model("qwen-max") // 使用通义千问 Turbo 模型，速度快且便宜
                     .messages(Arrays.asList(userMessage))
                     .resultFormat(GenerationParam.ResultFormat.MESSAGE)
@@ -299,5 +585,4 @@ public class AiService {
             e.printStackTrace();
         }
     }
-
 }
