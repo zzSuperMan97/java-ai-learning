@@ -365,109 +365,11 @@ public class AiController {
     @GetMapping("/function-call")
     @ResponseBody
     public String functionCall(@RequestParam String question) {
-        // 定义三个业务函数
-        FunctionDefinition querySalesFunc = FunctionDefinition.builder()
-                .name("query_sales_data")
-                .description("查询指定区域和月份的销售额数据,month 参数必须是 YYYY-MM 格式，如 2024-05 需要用户提供月份")
-                .parameters(createSalesQueryParameters())
-                .build();
-
-        FunctionDefinition queryInventoryFunc = FunctionDefinition.builder()
-                .name("query_inventory")
-                .description("查询指定区域和产品的库存数量")
-                .parameters(createInventoryQueryParameters())
-                .build();
-
-        FunctionDefinition queryCustomerFunc = FunctionDefinition.builder()
-                .name("query_customer")
-                .description("查询指定客户的详细信息，包括等级、订单数、消费总额等")
-                .parameters(createCustomerQueryParameters())
-                .build();
 
         // 三个函数一起传给 LLM，由 LLM 根据问题自动选择
         return aiService.chatWithFunctions(question,
-                java.util.Arrays.asList(querySalesFunc, queryInventoryFunc, queryCustomerFunc));
+                aiService.creatQueryFunctions());
     }
 
-    /**
-     * 创建销售查询函数的参数定义
-     */
-    private JsonObject createSalesQueryParameters() {
-        JsonObject parameters = new JsonObject();
-        parameters.addProperty("type", "object");
-
-        JsonObject properties = new JsonObject();
-
-        JsonObject regionProp = new JsonObject();
-        regionProp.addProperty("type", "string");
-        regionProp.addProperty("description", "区域名称，如华东、华北、华南等");
-        properties.add("region", regionProp);
-
-        JsonObject monthProp = new JsonObject();
-        monthProp.addProperty("type", "string");
-        monthProp.addProperty("description", "月份，格式为YYYY-MM，如2024-05");
-        properties.add("month", monthProp);
-
-        parameters.add("properties", properties);
-
-        JsonArray required = new JsonArray();
-        required.add("region");
-        required.add("month");
-        parameters.add("required", required);
-
-        return parameters;
-    }
-
-    /**
-     * 创建库存查询函数的参数定义
-     */
-    private JsonObject createInventoryQueryParameters() {
-        JsonObject parameters = new JsonObject();
-        parameters.addProperty("type", "object");
-
-        JsonObject properties = new JsonObject();
-
-        JsonObject regionProp = new JsonObject();
-        regionProp.addProperty("type", "string");
-        regionProp.addProperty("description", "区域名称，如华东、华北、华南等");
-        properties.add("region", regionProp);
-
-        JsonObject productProp = new JsonObject();
-        productProp.addProperty("type", "string");
-        productProp.addProperty("description", "产品名称，如手机、笔记本等");
-        properties.add("product", productProp);
-
-        parameters.add("properties", properties);
-
-        JsonArray required = new JsonArray();
-        required.add("region");
-        required.add("product");
-        parameters.add("required", required);
-
-        return parameters;
-    }
-
-    /**
-     * 创建客户查询函数的参数定义
-     */
-    private JsonObject createCustomerQueryParameters() {
-        JsonObject parameters = new JsonObject();
-        parameters.addProperty("type", "object");
-
-        JsonObject properties = new JsonObject();
-
-        JsonObject nameProp = new JsonObject();
-        nameProp.addProperty("type", "string");
-        nameProp.addProperty("description", "客户名称，如华为、小米等");
-        properties.add("customer_name", nameProp);
-
-        parameters.add("properties", properties);
-
-        JsonArray required = new JsonArray();
-        required.add("customer_name");
-        parameters.add("required", required);
-
-        return parameters;
-    }
 
 }

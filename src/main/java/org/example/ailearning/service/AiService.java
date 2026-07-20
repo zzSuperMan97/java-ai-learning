@@ -16,9 +16,8 @@ import com.alibaba.dashscope.exception.InputRequiredException;
 import com.alibaba.dashscope.exception.NoApiKeyException;
 import com.alibaba.dashscope.tools.FunctionDefinition;
 import com.alibaba.dashscope.tools.ToolFunction;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
+import com.google.gson.*;
+import com.google.gson.reflect.TypeToken;
 import org.apache.poi.util.StringUtil;
 import org.example.ailearning.utils.StrTool;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,10 +30,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -477,9 +473,10 @@ public class AiService {
                 .skip(Math.max(0, entries.size() - lastN))
                 .map(entry -> {
                     String json = String.valueOf(entry.getValue());
+                    Map<String, String> msg = new Gson().fromJson(json, new TypeToken<Map<String, String>>(){}.getType());
+                    String role = msg.get("role");
+                    String content = msg.get("content");
                     // 简单解析 JSON，提取 role 和 content
-                    String role = json.contains("\"user\"") ? "用户" : "AI";
-                    String content = json.replaceAll(".*\"content\":\"(.*)\"\\s*}$", "$1");
                     return role + "：" + content;
                 })
                 .collect(Collectors.joining("\n"));
@@ -491,45 +488,135 @@ public class AiService {
     public String chatWithHistory(String sessionId, String question) {
         // 1. 保存用户问题
         saveMessage(sessionId, "user", question);
+        String key = String.format("chat:history:tokenCount:%s",sessionId);
+
+        // 意图识别
+        String intent = recognizeIntent(question);
+        JsonObject asJsonObject = JsonParser.parseString(intent).getAsJsonObject();
+        String intentStr = asJsonObject.get("intent").getAsString();
 
         // 2. 获取最近对话历史
         String history = getHistory(sessionId, 10);
-
-        // 3. RAG：检索知识库
-        List<Double> queryVector = getEmbedding(question);
-        List<String> relevantDocs = knowledgeBaseService.searchBySimilarity(queryVector, 3, 0.5);
-
-        // 4. 组装 Prompt：系统角色 + 历史对话 + 参考资料 + 当前问题
-        StringBuilder prompt = new StringBuilder();
-        prompt.append("你是一个专业的销售数据分析师，只根据提供的资料回答问题，不要编造数据。\n\n");
-
-        if (!history.isEmpty()) {
-            prompt.append("以下是之前的对话记录：\n");
-            prompt.append(history);
-            prompt.append("\n\n");
+        String tokenCount = redisTemplate.opsForValue().get(key);
+        if (tokenCount!=null && Integer.parseInt(tokenCount) >= 100) {
+            // 压缩对话
+            history = summarizeHistory(history,sessionId);
+            redisTemplate.opsForValue().set(key,"0");
         }
+        System.out.println("intentStr："+intentStr);
+        if ("chat".equals(intentStr)) {
+            // 闲聊：不走 RAG，直接调 LLM
 
-        if (!relevantDocs.isEmpty()) {
-            prompt.append("参考资料：\n");
-            for (int i = 0; i < relevantDocs.size(); i++) {
-                prompt.append(i + 1).append(". ").append(relevantDocs.get(i)).append("\n");
+            // 组装 Prompt：历史对话 + 当前问题
+            StringBuilder prompt = new StringBuilder();
+
+            if (!history.isEmpty()) {
+                prompt.append("以下是之前的对话记录：\n");
+                prompt.append(history);
+                prompt.append("\n\n");
             }
-            prompt.append("\n");
-        } else {
-            prompt.append("知识库中没有找到相关信息，如果用户问题无法回答，请告知。\n\n");
+
+            prompt.append("用户当前问题：").append(question);
+
+            // 5. 调用 LLM
+            String answer = chatToken(prompt.toString(),sessionId);
+
+            // 6. 保存 AI 回答
+            saveMessage(sessionId, "assistant", answer);
+
+            return answer;
+        } else if ("query_data".equals(intentStr)) {
+            // 查数据：走 Function Calling
+            List<FunctionDefinition> functionDefinitions = creatQueryFunctions();
+            return chatWithFunctions(question,functionDefinitions);
+        } else if ("rag".equals(intentStr)) {
+            // 3. RAG：检索知识库
+            List<Double> queryVector = getEmbedding(question);
+            List<String> relevantDocs = knowledgeBaseService.searchBySimilarity(queryVector, 3, 0.5);
+
+            // 4. 组装 Prompt：系统角色 + 历史对话 + 参考资料 + 当前问题
+            StringBuilder prompt = new StringBuilder();
+            prompt.append("你是一个专业的销售数据分析师，只根据提供的资料回答问题，不要编造数据。\n\n");
+
+            if (!history.isEmpty()) {
+                prompt.append("以下是之前的对话记录：\n");
+                prompt.append(history);
+                prompt.append("\n\n");
+            }
+
+            if (!relevantDocs.isEmpty()) {
+                prompt.append("参考资料：\n");
+                for (int i = 0; i < relevantDocs.size(); i++) {
+                    prompt.append(i + 1).append(". ").append(relevantDocs.get(i)).append("\n");
+                }
+                prompt.append("\n");
+            } else {
+                prompt.append("知识库中没有找到相关信息，如果用户问题无法回答，请告知。\n\n");
+            }
+
+            prompt.append("用户当前问题：").append(question);
+
+            // 5. 调用 LLM
+            String answer = chatToken(prompt.toString(),sessionId);
+
+            // 6. 保存 AI 回答
+            saveMessage(sessionId, "assistant", answer);
+
+            return answer;
+
+        } else if ("report".equals(intentStr)) {
+            // 生成报告：暂时返回提示
+            String answer = "报告功能开发中，敬请期待。";
+            saveMessage(sessionId, "assistant", answer);
+            return answer;
         }
-
-        prompt.append("用户当前问题：").append(question);
-
-        // 5. 调用 LLM
-        String answer = chat(prompt.toString());
-
-        // 6. 保存 AI 回答
-        saveMessage(sessionId, "assistant", answer);
-
-        return answer;
+        return "网络断开，稍后重试";
     }
 
+    /**
+     * 发送消息给通义千问，并获取回复
+     * @param prompt 用户的问题
+     * @return AI 的回答
+     */
+    public String chatToken(String prompt,String sessionId) {
+        String key = String.format("chat:history:tokenCount:%s",sessionId);
+        String s = redisTemplate.opsForValue().get(key);
+        try {
+            // 1. 构建消息对象
+            Message systemMessage = Message.builder()
+                    .role(Role.SYSTEM.getValue())
+                    .content("你是一个专业的销售数据分析师，只根据提供的资料回答问题，不要编造数据。 没有数据就不要瞎说")
+                    .build();
+
+            Message userMessage = Message.builder()
+                    .role(Role.USER.getValue())
+                    .content(prompt)
+                    .build();
+
+            // 2. 构建请求参数
+            GenerationParam param = GenerationParam.builder()
+                    .apiKey(apiKey)
+                    .model("qwen-plus")
+                    .messages(Arrays.asList(systemMessage,userMessage))
+                    .resultFormat(GenerationParam.ResultFormat.MESSAGE)
+                    .build();
+
+            // 3. 调用 API
+            Generation generation = new Generation();
+            GenerationResult result = generation.call(param);
+            Integer inputTokens = result.getUsage().getInputTokens();
+            Integer outputTokens = result.getUsage().getOutputTokens();
+            int oldCount = s != null ? Integer.parseInt(s) : 0;
+            int newCount = oldCount + inputTokens + outputTokens;
+            redisTemplate.opsForValue().set(key,String.valueOf(newCount));
+            // 4. 提取并返回回答
+            return result.getOutput().getChoices().get(0).getMessage().getContent();
+
+        } catch (ApiException | NoApiKeyException | InputRequiredException e) {
+            e.printStackTrace();
+            return "AI 调用失败: " + e.getMessage();
+        }
+    }
 
     /**
      * 发送消息给通义千问，并获取回复
@@ -584,5 +671,148 @@ public class AiService {
         } catch (ApiException | NoApiKeyException | InputRequiredException e) {
             e.printStackTrace();
         }
+    }
+
+    private String summarizeHistory(String history,String sessionId) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("你是销售数据分析师。请将以下对话历史压缩为一段摘要，要求：\n" +
+                "1. 保留用户提到的个人信息（姓名、部门等）\n" +
+                "2. 保留所有查询过的数据结果（区域、月份、销售额等）\n" +
+                "3. 保留用户的核心意图和未完成的请求\n" +
+                "4. 不要编造任何数据，没有的信息不要写\n" +
+                "5. 摘要控制在200字以内\n" +
+                "6. 用简洁的陈述句，不要对话形式\n" +
+                "\n" +
+                "对话历史："+"\n");
+        prompt.append(history);
+        String chat = chat(prompt.toString());
+        String key = String.format("chat:history:%s",sessionId);
+        redisTemplate.delete(key);
+        redisTemplate.opsForHash().put(key,String.valueOf(System.currentTimeMillis()),
+                String.format("{\"role\":\"summary\",\"content\":\"%s\"}",chat));
+        return chat;
+    }
+
+    private String recognizeIntent(String question) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("你是意图识别器。根据用户的问题，判断其意图类别。\n" +
+                "\n" +
+                "可选类别：\n" +
+                "- chat：闲聊（你好、谢谢、再见等）\n" +
+                "- query_data：查询业务数据（销售额、库存、客户信息等）\n" +
+                "- rag：知识问答（公司介绍、产品说明、政策制度等）\n" +
+                "- report：生成报告（月度报告、分析报告等）\n" +
+                "\n" +
+                "要求：\n" +
+                "1. 只返回 JSON，不要任何其他文字\n" +
+                "2. 格式：{\"intent\": \"类别\"}\n" +
+                "\n" +
+                "用户问题："+"\n"+question);
+        String chat = chat(prompt.toString());
+        return chat;
+    }
+
+    public List<FunctionDefinition> creatQueryFunctions(){
+        // 定义三个业务函数
+        FunctionDefinition querySalesFunc = FunctionDefinition.builder()
+                .name("query_sales_data")
+                .description("查询指定区域和月份的销售额数据,month 参数必须是 YYYY-MM 格式，如 2024-05 需要用户提供月份")
+                .parameters(createSalesQueryParameters())
+                .build();
+
+        FunctionDefinition queryInventoryFunc = FunctionDefinition.builder()
+                .name("query_inventory")
+                .description("查询指定区域和产品的库存数量")
+                .parameters(createInventoryQueryParameters())
+                .build();
+
+        FunctionDefinition queryCustomerFunc = FunctionDefinition.builder()
+                .name("query_customer")
+                .description("查询指定客户的详细信息，包括等级、订单数、消费总额等")
+                .parameters(createCustomerQueryParameters())
+                .build();
+        return Arrays.asList(querySalesFunc, queryInventoryFunc, queryCustomerFunc);
+    }
+
+
+    /**
+     * 创建销售查询函数的参数定义
+     */
+    private JsonObject createSalesQueryParameters() {
+        JsonObject parameters = new JsonObject();
+        parameters.addProperty("type", "object");
+
+        JsonObject properties = new JsonObject();
+
+        JsonObject regionProp = new JsonObject();
+        regionProp.addProperty("type", "string");
+        regionProp.addProperty("description", "区域名称，如华东、华北、华南等");
+        properties.add("region", regionProp);
+
+        JsonObject monthProp = new JsonObject();
+        monthProp.addProperty("type", "string");
+        monthProp.addProperty("description", "月份，格式为YYYY-MM，如2024-05");
+        properties.add("month", monthProp);
+
+        parameters.add("properties", properties);
+
+        JsonArray required = new JsonArray();
+        required.add("region");
+        required.add("month");
+        parameters.add("required", required);
+
+        return parameters;
+    }
+
+    /**
+     * 创建库存查询函数的参数定义
+     */
+    private JsonObject createInventoryQueryParameters() {
+        JsonObject parameters = new JsonObject();
+        parameters.addProperty("type", "object");
+
+        JsonObject properties = new JsonObject();
+
+        JsonObject regionProp = new JsonObject();
+        regionProp.addProperty("type", "string");
+        regionProp.addProperty("description", "区域名称，如华东、华北、华南等");
+        properties.add("region", regionProp);
+
+        JsonObject productProp = new JsonObject();
+        productProp.addProperty("type", "string");
+        productProp.addProperty("description", "产品名称，如手机、笔记本等");
+        properties.add("product", productProp);
+
+        parameters.add("properties", properties);
+
+        JsonArray required = new JsonArray();
+        required.add("region");
+        required.add("product");
+        parameters.add("required", required);
+
+        return parameters;
+    }
+
+    /**
+     * 创建客户查询函数的参数定义
+     */
+    private JsonObject createCustomerQueryParameters() {
+        JsonObject parameters = new JsonObject();
+        parameters.addProperty("type", "object");
+
+        JsonObject properties = new JsonObject();
+
+        JsonObject nameProp = new JsonObject();
+        nameProp.addProperty("type", "string");
+        nameProp.addProperty("description", "客户名称，如华为、小米等");
+        properties.add("customer_name", nameProp);
+
+        parameters.add("properties", properties);
+
+        JsonArray required = new JsonArray();
+        required.add("customer_name");
+        parameters.add("required", required);
+
+        return parameters;
     }
 }
