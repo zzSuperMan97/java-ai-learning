@@ -15,6 +15,7 @@ import com.alibaba.dashscope.exception.ApiException;
 import com.alibaba.dashscope.exception.InputRequiredException;
 import com.alibaba.dashscope.exception.NoApiKeyException;
 import com.alibaba.dashscope.tools.FunctionDefinition;
+import com.alibaba.dashscope.tools.ToolBase;
 import com.alibaba.dashscope.tools.ToolFunction;
 import com.google.gson.*;
 import com.google.gson.reflect.TypeToken;
@@ -29,6 +30,7 @@ import org.springframework.util.ObjectUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -98,7 +100,7 @@ public class AiService {
                     .build();
 
             // 2. 将 FunctionDefinition 包装成 ToolFunction
-            List<com.alibaba.dashscope.tools.ToolBase> tools = new java.util.ArrayList<>();
+            List<ToolBase> tools = new ArrayList<>();
             for (FunctionDefinition func : functions) {
                 tools.add(ToolFunction.builder().function(func).build());
             }
@@ -123,11 +125,11 @@ public class AiService {
                 // LLM 决定调用函数
                 Object toolCall = responseMessage.getToolCalls().get(0);
                 // 使用反射获取 function 信息
-                java.lang.reflect.Method getFunctionMethod = toolCall.getClass().getMethod("getFunction");
+                Method getFunctionMethod = toolCall.getClass().getMethod("getFunction");
                 Object functionCall = getFunctionMethod.invoke(toolCall);
                 
-                java.lang.reflect.Method getNameMethod = functionCall.getClass().getMethod("getName");
-                java.lang.reflect.Method getArgumentsMethod = functionCall.getClass().getMethod("getArguments");
+                Method getNameMethod = functionCall.getClass().getMethod("getName");
+                Method getArgumentsMethod = functionCall.getClass().getMethod("getArguments");
                 
                 String functionName = (String) getNameMethod.invoke(functionCall);
                 String arguments = (String) getArgumentsMethod.invoke(functionCall);
@@ -179,7 +181,7 @@ public class AiService {
                 for (i = 0; i < 3; i++) {
                     try {
                         Map<String, Object> result = querySalesData(region, month);
-                        return new com.google.gson.Gson().toJson(result);
+                        return new Gson().toJson(result);
                     }catch (Exception e){
                         e.getMessage();
                     }
@@ -189,11 +191,11 @@ public class AiService {
                 String region = extractJsonValue(arguments, "region");
                 String product = extractJsonValue(arguments, "product");
                 Map<String, Object> result = queryInventory(region, product);
-                return new com.google.gson.Gson().toJson(result);
+                return new Gson().toJson(result);
             } else if ("query_customer".equals(functionName)) {
                 String customerName = extractJsonValue(arguments, "customer_name");
                 Map<String, Object> result = queryCustomer(customerName);
-                return new com.google.gson.Gson().toJson(result);
+                return new Gson().toJson(result);
             }
             return "{\"error\": \"未知函数\"}";
         } catch (Exception e) {
@@ -343,7 +345,7 @@ public class AiService {
             TextEmbeddingParam param = TextEmbeddingParam.builder()
                     .apiKey(apiKey)
                     .model("text-embedding-v1")
-                    .texts(java.util.Arrays.asList(text))
+                    .texts(Arrays.asList(text))
                     .build();
 
             TextEmbedding embedding = new TextEmbedding();
@@ -482,6 +484,58 @@ public class AiService {
                 .collect(Collectors.joining("\n"));
     }
 
+
+    private String handleChat(String history,String question,String sessionId) {
+        // 组装 Prompt：历史对话 + 当前问题
+        StringBuilder prompt = new StringBuilder();
+
+        if (!history.isEmpty()) {
+            prompt.append("以下是之前的对话记录：\n");
+            prompt.append(history);
+            prompt.append("\n\n");
+        }
+
+        prompt.append("用户当前问题：").append(question);
+
+        return chatToken(prompt.toString(),sessionId);
+    }
+
+
+    private String handleQueryData(String question) {
+        List<FunctionDefinition> functionDefinitions = creatQueryFunctions();
+        return chatWithFunctions(question,functionDefinitions);
+    }
+
+    private String handleRag(String history,String question,String sessionId) {
+        List<Double> queryVector = getEmbedding(question);
+        List<String> relevantDocs = knowledgeBaseService.searchBySimilarity(queryVector, 3, 0.5);
+
+        // 4. 组装 Prompt：系统角色 + 历史对话 + 参考资料 + 当前问题
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("你是一个专业的销售数据分析师，只根据提供的资料回答问题，不要编造数据。\n\n");
+
+        if (!history.isEmpty()) {
+            prompt.append("以下是之前的对话记录：\n");
+            prompt.append(history);
+            prompt.append("\n\n");
+        }
+
+        if (!relevantDocs.isEmpty()) {
+            prompt.append("参考资料：\n");
+            for (int i = 0; i < relevantDocs.size(); i++) {
+                prompt.append(i + 1).append(". ").append(relevantDocs.get(i)).append("\n");
+            }
+            prompt.append("\n");
+        } else {
+            prompt.append("知识库中没有找到相关信息，如果用户问题无法回答，请告知。\n\n");
+        }
+
+        prompt.append("用户当前问题：").append(question);
+
+        // 5. 调用 LLM
+        return chatToken(prompt.toString(),sessionId);
+    }
+
     /**
      * 带上下文的 RAG 多轮对话
      */
@@ -497,80 +551,31 @@ public class AiService {
 
         // 2. 获取最近对话历史
         String history = getHistory(sessionId, 10);
+
         String tokenCount = redisTemplate.opsForValue().get(key);
         if (tokenCount!=null && Integer.parseInt(tokenCount) >= 100) {
             // 压缩对话
             history = summarizeHistory(history,sessionId);
             redisTemplate.opsForValue().set(key,"0");
         }
-        System.out.println("intentStr："+intentStr);
+
+
+        String answer = "";
         if ("chat".equals(intentStr)) {
             // 闲聊：不走 RAG，直接调 LLM
-
-            // 组装 Prompt：历史对话 + 当前问题
-            StringBuilder prompt = new StringBuilder();
-
-            if (!history.isEmpty()) {
-                prompt.append("以下是之前的对话记录：\n");
-                prompt.append(history);
-                prompt.append("\n\n");
-            }
-
-            prompt.append("用户当前问题：").append(question);
-
-            // 5. 调用 LLM
-            String answer = chatToken(prompt.toString(),sessionId);
-
-            // 6. 保存 AI 回答
-            saveMessage(sessionId, "assistant", answer);
-
-            return answer;
+            answer = handleChat(history, question, sessionId);
         } else if ("query_data".equals(intentStr)) {
             // 查数据：走 Function Calling
-            List<FunctionDefinition> functionDefinitions = creatQueryFunctions();
-            return chatWithFunctions(question,functionDefinitions);
+            answer = handleQueryData(question);
         } else if ("rag".equals(intentStr)) {
             // 3. RAG：检索知识库
-            List<Double> queryVector = getEmbedding(question);
-            List<String> relevantDocs = knowledgeBaseService.searchBySimilarity(queryVector, 3, 0.5);
-
-            // 4. 组装 Prompt：系统角色 + 历史对话 + 参考资料 + 当前问题
-            StringBuilder prompt = new StringBuilder();
-            prompt.append("你是一个专业的销售数据分析师，只根据提供的资料回答问题，不要编造数据。\n\n");
-
-            if (!history.isEmpty()) {
-                prompt.append("以下是之前的对话记录：\n");
-                prompt.append(history);
-                prompt.append("\n\n");
-            }
-
-            if (!relevantDocs.isEmpty()) {
-                prompt.append("参考资料：\n");
-                for (int i = 0; i < relevantDocs.size(); i++) {
-                    prompt.append(i + 1).append(". ").append(relevantDocs.get(i)).append("\n");
-                }
-                prompt.append("\n");
-            } else {
-                prompt.append("知识库中没有找到相关信息，如果用户问题无法回答，请告知。\n\n");
-            }
-
-            prompt.append("用户当前问题：").append(question);
-
-            // 5. 调用 LLM
-            String answer = chatToken(prompt.toString(),sessionId);
-
-            // 6. 保存 AI 回答
-            saveMessage(sessionId, "assistant", answer);
-
-            return answer;
-
+            answer = handleRag(history, question, sessionId);
         } else if ("report".equals(intentStr)) {
             // 生成报告：暂时返回提示
-            String answer = "报告功能开发中，敬请期待。";
-            saveMessage(sessionId, "assistant", answer);
-            return answer;
+            answer = "报告功能开发中，敬请期待。";
         }
-        return "网络断开，稍后重试";
+        saveMessage(sessionId, "assistant", answer);
+        return answer;
     }
 
     /**
