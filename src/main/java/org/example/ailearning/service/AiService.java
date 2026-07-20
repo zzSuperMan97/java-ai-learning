@@ -540,6 +540,14 @@ public class AiService {
      * 带上下文的 RAG 多轮对话
      */
     public String chatWithHistory(String sessionId, String question) {
+        // 2. 获取最近对话历史
+        String history = getHistory(sessionId, 10);
+        if (history.isEmpty()) {
+            String welcome = "您好！我是销售数据助手，可以帮您：\n1. 查询销售数据\n2. 查询库存信息\n3. 查询客户信息\n4. 回答业务知识问题\n请问有什么可以帮您？";
+            saveMessage(sessionId, "assistant", welcome);
+            return welcome;
+        }
+
         // 1. 保存用户问题
         saveMessage(sessionId, "user", question);
         String key = String.format("chat:history:tokenCount:%s",sessionId);
@@ -549,8 +557,6 @@ public class AiService {
         JsonObject asJsonObject = JsonParser.parseString(intent).getAsJsonObject();
         String intentStr = asJsonObject.get("intent").getAsString();
 
-        // 2. 获取最近对话历史
-        String history = getHistory(sessionId, 10);
 
         String tokenCount = redisTemplate.opsForValue().get(key);
         if (tokenCount!=null && Integer.parseInt(tokenCount) >= 100) {
@@ -573,9 +579,25 @@ public class AiService {
         } else if ("report".equals(intentStr)) {
             // 生成报告：暂时返回提示
             answer = "报告功能开发中，敬请期待。";
+        }else if ("clear".equals(intentStr)) {
+            // 清除历史对话
+            answer = handleClearChat(sessionId);
+            return answer;
+        }else {
+            // 闲聊：不走 RAG，直接调 LLM
+            answer = handleChat(history, question, sessionId);
         }
+        System.out.println(intentStr);
         saveMessage(sessionId, "assistant", answer);
         return answer;
+    }
+
+    private String handleClearChat(String sessionId) {
+        String tokenCount = String.format("chat:history:tokenCount:%s",sessionId);
+        String history = String.format("chat:history:%s",sessionId);
+        redisTemplate.delete(tokenCount);
+        redisTemplate.delete(history);
+        return "清除成功";
     }
 
     /**
@@ -707,6 +729,7 @@ public class AiService {
                 "- query_data：查询业务数据（销售额、库存、客户信息等）\n" +
                 "- rag：知识问答（公司介绍、产品说明、政策制度等）\n" +
                 "- report：生成报告（月度报告、分析报告等）\n" +
+                "- clear：清除对话\n" +
                 "\n" +
                 "要求：\n" +
                 "1. 只返回 JSON，不要任何其他文字\n" +
