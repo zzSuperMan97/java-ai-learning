@@ -21,6 +21,7 @@ import com.google.gson.*;
 import com.google.gson.reflect.TypeToken;
 import org.apache.poi.util.StringUtil;
 import org.example.ailearning.utils.StrTool;
+import org.example.ailearning.utils.WordGenerator;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -48,6 +49,9 @@ public class AiService {
 
     @Autowired
     private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    private WordGenerator wordGenerator;
 
     /**
      * 发送消息给通义千问，并获取回复
@@ -196,6 +200,9 @@ public class AiService {
                 String customerName = extractJsonValue(arguments, "customer_name");
                 Map<String, Object> result = queryCustomer(customerName);
                 return new Gson().toJson(result);
+            } else if ("generate_report".equals(functionName)) {
+                String content = extractJsonValue(arguments, "content");
+                return generateReport(content);
             }
             return "{\"error\": \"未知函数\"}";
         } catch (Exception e) {
@@ -759,7 +766,13 @@ public class AiService {
                 .description("查询指定客户的详细信息，包括等级、订单数、消费总额等")
                 .parameters(createCustomerQueryParameters())
                 .build();
-        return Arrays.asList(querySalesFunc, queryInventoryFunc, queryCustomerFunc);
+
+        FunctionDefinition generateReportFunc = FunctionDefinition.builder()
+                .name("generate_report")
+                .description("根据分析内容生成Word格式的报告")
+                .parameters(createReportFunction())
+                .build();
+        return Arrays.asList(querySalesFunc, queryInventoryFunc, queryCustomerFunc,generateReportFunc);
     }
 
 
@@ -842,5 +855,121 @@ public class AiService {
         parameters.add("required", required);
 
         return parameters;
+    }
+
+    /**
+     * 创建报告生成函数的参数定义
+     */
+    private JsonObject createReportFunction() {
+        JsonObject parameters = new JsonObject();
+        parameters.addProperty("type", "object");
+
+        JsonObject properties = new JsonObject();
+
+        JsonObject nameProp = new JsonObject();
+        nameProp.addProperty("type", "string");
+        nameProp.addProperty("description", "根据分析内容生成Word格式的报告，参数content为报告的分析内容");
+        properties.add("content", nameProp);
+
+        parameters.add("properties", properties);
+
+        JsonArray required = new JsonArray();
+        required.add("content");
+        parameters.add("required", required);
+
+        return parameters;
+    }
+
+
+
+    /**
+     * 带函数调用的聊天（Function Calling）
+     */
+    public String newChatWithFunctions(String prompt, List<FunctionDefinition> functions) {
+        try {
+            // 1. 构建消息
+            Message userMessage = creatMessage(prompt, Role.USER.getValue());
+            List<Message> messages = new ArrayList<>(5);
+            messages.add(userMessage);
+            // 2. 将 FunctionDefinition 包装成 ToolFunction
+            List<ToolBase> tools = new ArrayList<>();
+            for (FunctionDefinition func : functions) {
+                tools.add(ToolFunction.builder().function(func).build());
+            }
+            int step = 0;
+            int maxSteps = 5;
+            while (step < maxSteps) {
+                System.out.println("第" + (step + 1) + "轮, messages数量: " + messages.size());
+                //  构建请求参数，使用 tools() 而不是 functions()
+                GenerationParam param = GenerationParam.builder()
+                        .apiKey(apiKey)
+                        .model("qwen-plus")
+                        .messages(messages)
+                        .tools(tools)
+                        .resultFormat(GenerationParam.ResultFormat.MESSAGE)
+                        .build();
+                // 4. 调用 API
+                Generation generation = new Generation();
+                GenerationResult result = generation.call(param);
+
+                // 5. 检查是否需要调用函数
+                Message responseMessage = result.getOutput().getChoices().get(0).getMessage();
+
+                if (responseMessage.getToolCalls() != null && !responseMessage.getToolCalls().isEmpty()) {                    // LLM 决定调用函数
+                    Object toolCall = responseMessage.getToolCalls().get(0);
+                    // 使用反射获取 function 信息
+                    Method getFunctionMethod = toolCall.getClass().getMethod("getFunction");
+                    Object functionCall = getFunctionMethod.invoke(toolCall);
+
+                    Method getNameMethod = functionCall.getClass().getMethod("getName");
+                    Method getArgumentsMethod = functionCall.getClass().getMethod("getArguments");
+
+                    String functionName = (String) getNameMethod.invoke(functionCall);
+                    String arguments = (String) getArgumentsMethod.invoke(functionCall);
+
+                    System.out.println("LLM 决定调用函数: " + functionName);
+                    System.out.println("参数: " + arguments);
+
+                    // 6. 执行函数并获取结果
+                    String functionResult = executeFunction(functionName, arguments);
+
+                    // 7. 将函数结果返回给 LLM 生成最终回答
+                    Message functionMessage = Message.builder()
+                            .role("tool")
+                            .content(functionResult)
+                            .build();
+                    messages.add(responseMessage);
+                    messages.add(functionMessage);
+                } else {
+                    // 不需要调用函数，直接返回回答
+                    return responseMessage.getContent();
+                }
+                step ++;
+            }
+            return "未知数据不能判断";
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "AI 调用失败: " + e.getMessage();
+        }
+    }
+
+    public Message creatMessage(String prompt,String role) {
+        Message message = Message.builder()
+                .role(role)
+                .content(prompt)
+                .build();
+        return message;
+    }
+
+    public String generateReport(String content) throws Exception {
+        Map<String, Object> data = new HashMap<>();
+        data.put("reporter", "张三");
+        data.put("date", "2026-06-14");
+        data.put("total_sales", "150");
+        data.put("growth_rate", "12.5");
+        data.put("top_product", "智能手机 X-Pro");
+        data.put("ai_analysis", content);
+        data.put("next_plan", "1. 跟进大客户订单\n2. 优化库存管理");
+        return wordGenerator.generateReport(data);
     }
 }

@@ -371,5 +371,14 @@ public class AiController {
                 aiService.creatQueryFunctions());
     }
 
+    @GetMapping("/agent")
+    @ResponseBody
+    public String aiAgent(@RequestParam String question) {
+
+        // 三个函数一起传给 LLM，由 LLM 根据问题自动选择
+        return aiService.newChatWithFunctions(question,
+                aiService.creatQueryFunctions());
+    }
+
 
 }
