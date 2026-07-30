@@ -885,11 +885,21 @@ public class AiService {
     /**
      * 带函数调用的聊天（Function Calling）
      */
-    public String newChatWithFunctions(String prompt, List<FunctionDefinition> functions) {
+    public String newChatWithFunctions(String prompt, List<FunctionDefinition> functions, String sessionId) {
         try {
+            List<Message> messages = new ArrayList<>(5);
+            String key = String.format("agent:memory:%s",sessionId);
+            String memory = redisTemplate.opsForValue().get(key);
+            if (!StringUtil.isBlank(memory)){
+                StringBuilder promptStr = new StringBuilder();
+                promptStr.append("这是你之前的工作记录：\n");
+                promptStr.append(memory);
+                Message message = creatMessage(promptStr.toString(), Role.SYSTEM.getValue());
+                messages.add(message);
+            }
+
             // 1. 构建消息
             Message userMessage = creatMessage(prompt, Role.USER.getValue());
-            List<Message> messages = new ArrayList<>(5);
             messages.add(userMessage);
             // 2. 将 FunctionDefinition 包装成 ToolFunction
             List<ToolBase> tools = new ArrayList<>();
@@ -898,6 +908,9 @@ public class AiService {
             }
             int step = 0;
             int maxSteps = 5;
+            JsonObject properties = new JsonObject();
+            properties.addProperty("question",prompt);
+            List<String> funcs = new ArrayList<>(4);
             while (step < maxSteps) {
                 System.out.println("第" + (step + 1) + "轮, messages数量: " + messages.size());
                 //  构建请求参数，使用 tools() 而不是 functions()
@@ -926,7 +939,7 @@ public class AiService {
 
                     String functionName = (String) getNameMethod.invoke(functionCall);
                     String arguments = (String) getArgumentsMethod.invoke(functionCall);
-
+                    funcs.add(functionName);
                     System.out.println("LLM 决定调用函数: " + functionName);
                     System.out.println("参数: " + arguments);
 
@@ -942,6 +955,14 @@ public class AiService {
                     messages.add(functionMessage);
                 } else {
                     // 不需要调用函数，直接返回回答
+                    if (!StringUtil.isBlank(memory)) {
+                        // 旧记忆 + 新记忆拼接
+                        properties.addProperty("历史记录", memory);
+                    }
+                    properties.addProperty("本次问题", prompt);
+                    properties.addProperty("回答结果", responseMessage.getContent());
+                    properties.addProperty("访问函数", funcs.stream().collect(Collectors.joining("、")));
+                    redisTemplate.opsForValue().set(key, properties.toString());
                     return responseMessage.getContent();
                 }
                 step ++;
