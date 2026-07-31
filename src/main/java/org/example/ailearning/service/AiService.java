@@ -508,9 +508,9 @@ public class AiService {
     }
 
 
-    private String handleQueryData(String question) {
+    private String handleQueryData(String question,String sessionId) {
         List<FunctionDefinition> functionDefinitions = creatQueryFunctions();
-        return chatWithFunctions(question,functionDefinitions);
+        return newChatWithFunctions(question,functionDefinitions,sessionId);
     }
 
     private String handleRag(String history,String question,String sessionId) {
@@ -552,7 +552,7 @@ public class AiService {
         if (history.isEmpty()) {
             String welcome = "您好！我是销售数据助手，可以帮您：\n1. 查询销售数据\n2. 查询库存信息\n3. 查询客户信息\n4. 回答业务知识问题\n请问有什么可以帮您？";
             saveMessage(sessionId, "assistant", welcome);
-            return welcome;
+//            return welcome;
         }
 
         // 1. 保存用户问题
@@ -579,13 +579,13 @@ public class AiService {
             answer = handleChat(history, question, sessionId);
         } else if ("query_data".equals(intentStr)) {
             // 查数据：走 Function Calling
-            answer = handleQueryData(question);
+            answer = handleQueryData(question,sessionId);
         } else if ("rag".equals(intentStr)) {
             // 3. RAG：检索知识库
             answer = handleRag(history, question, sessionId);
         } else if ("report".equals(intentStr)) {
             // 生成报告：暂时返回提示
-            answer = "报告功能开发中，敬请期待。";
+            answer = handleQueryData(question,sessionId);
         }else if ("clear".equals(intentStr)) {
             // 清除历史对话
             answer = handleClearChat(sessionId);
