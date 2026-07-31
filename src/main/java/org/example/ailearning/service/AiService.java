@@ -888,6 +888,9 @@ public class AiService {
     public String newChatWithFunctions(String prompt, List<FunctionDefinition> functions, String sessionId) {
         try {
             List<Message> messages = new ArrayList<>(5);
+            Message message1 = creatMessage("你是一个具备规划能力的智能助手。收到任务后，必须先输出【执行计划】和编号步骤列表，然后逐步执行。每完成一步，打印完成情况，继续下一步。", Role.SYSTEM.getValue());
+            messages.add(message1);
+
             String key = String.format("agent:memory:%s",sessionId);
             String memory = redisTemplate.opsForValue().get(key);
             if (!StringUtil.isBlank(memory)){
@@ -927,7 +930,7 @@ public class AiService {
 
                 // 5. 检查是否需要调用函数
                 Message responseMessage = result.getOutput().getChoices().get(0).getMessage();
-
+                System.out.println("Agent思考：" + responseMessage.getContent());
                 if (responseMessage.getToolCalls() != null && !responseMessage.getToolCalls().isEmpty()) {                    // LLM 决定调用函数
                     Object toolCall = responseMessage.getToolCalls().get(0);
                     // 使用反射获取 function 信息
